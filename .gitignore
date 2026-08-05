@@ -17,15 +17,12 @@ venv/
 
 # Environment variables
 .env
+.env.local
 
-# Database
+# Generated media / static
 db.sqlite3
-
-# Django migrations (optional)
-*/migrations/*.py
-*/migrations/*.pyc
-!*/migrations/__init__.py
-
-# Static files (if you collect them in production)
 staticfiles/
 media/
+
+# Docker volumes (if any)
+postgres_data/

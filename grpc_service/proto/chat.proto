@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package chat;
+
+// Low-latency chat delivery over gRPC.
+// Used by the Django web service and peer microservices.
+
+service ChatService {
+  // Persist and fan-out a single message (unary RPC).
+  rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+
+  // Fetch recent messages for a room (unary RPC).
+  rpc GetMessages (GetMessagesRequest) returns (GetMessagesResponse);
+
+  // Presence snapshot for a list of user IDs.
+  rpc GetPresence (GetPresenceRequest) returns (GetPresenceResponse);
+
+  // Stream messages for a room in real time (server-side streaming).
+  rpc StreamRoom (StreamRoomRequest) returns (stream RoomEvent);
+}
+
+message SendMessageRequest {
+  int32 room_id = 1;
+  int32 sender_id = 2;
+  string content = 3;
+  string message_type = 4; // text | image | voice | document | video
+}
+
+message SendMessageResponse {
+  bool ok = 1;
+  int32 message_id = 2;
+  string content = 3;
+  string timestamp = 4;
+  string error = 5;
+}
+
+message GetMessagesRequest {
+  int32 room_id = 1;
+  int32 limit = 2;
+}
+
+message MessageItem {
+  int32 id = 1;
+  int32 room_id = 2;
+  int32 sender_id = 3;
+  string sender_username = 4;
+  string content = 5;
+  string message_type = 6;
+  string timestamp = 7;
+  bool is_read = 8;
+}
+
+message GetMessagesResponse {
+  repeated MessageItem messages = 1;
+  string error = 2;
+}
+
+message GetPresenceRequest {
+  repeated int32 user_ids = 1;
+}
+
+message PresenceItem {
+  int32 user_id = 1;
+  string username = 2;
+  bool is_online = 3;
+  string last_seen = 4;
+}
+
+message GetPresenceResponse {
+  repeated PresenceItem users = 1;
+}
+
+message StreamRoomRequest {
+  int32 room_id = 1;
+}
+
+message RoomEvent {
+  string event_type = 1; // message | presence | typing
+  MessageItem message = 2;
+  PresenceItem presence = 3;
+  string payload_json = 4;
+}

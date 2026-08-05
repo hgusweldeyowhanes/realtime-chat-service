@@ -1,8 +1,12 @@
-from django.urls import path
-from .consumers import ChatConsumer,PresenceConsumer
+from django.urls import path, re_path
+
+from chatapp.consumers import ChatConsumer, PresenceConsumer
 
 websocket_urlpatterns = [
-    path('ws/notification/<str:room_name>/', ChatConsumer.as_asgi()),
-    path(r'ws/presence/$', PresenceConsumer.as_asgi()),
-
+    # Real-time one-to-one / group chat room
+    path("ws/chat/<str:room_name>/", ChatConsumer.as_asgi()),
+    # Backwards-compatible path used by existing templates
+    path("ws/notification/<str:room_name>/", ChatConsumer.as_asgi()),
+    # Global presence tracking
+    re_path(r"^ws/presence/$", PresenceConsumer.as_asgi()),
 ]

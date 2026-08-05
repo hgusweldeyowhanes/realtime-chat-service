@@ -1,157 +1,216 @@
-# 💬 Secure Real-Time Chat Application
-A comprehensive, real-time chat application built with Django, featuring end-to-end encryption, multimedia support, and advanced messaging capabilities.
+# Real-Time Chat Service
 
-## 🚀 Features
-### 🔒 Security & Privacy
-End-to-End Encryption using Fernet symmetric encryption
+A real-time messaging backend supporting **one-to-one** and **group** chats with
+**WebSockets** and **gRPC** for low-latency delivery. Features presence tracking,
+message persistence in **PostgreSQL**, and containerized microservices.
 
-User Blocking System with privacy controls
+| Layer | Technology |
+|-------|------------|
+| API & auth | Django + DRF + JWT |
+| Real-time | Django Channels WebSockets |
+| Low-latency path | gRPC microservice |
+| Persistence | PostgreSQL |
+| Channel layer | Redis |
+| Packaging | Docker Compose |
 
-Message Deletion with soft/hard delete options
+---
 
-Secure File Attachments with encrypted storage
+## Architecture
 
-## 💬 Messaging Capabilities
-Real-time Chat with WebSocket support
-
-Multiple Message Types: Text, Images, Voice, Video, Documents
-
-Message Threading with reply functionality
-
-Read Receipts and delivery status
-
-Message Editing with edit history
-
-Emoji Reactions with custom emoji support
-
-## 👥 User Management
-Online/Offline Status with last seen tracking
-
-Typing Indicators in real-time
-
-User Status updates
-
-Chat Room Management with member controls
-
-## 🏗️ Chat Rooms & Groups
-Private Chats (1-on-1 conversations)
-
-Group Chats with multiple participants
-
-Chat Room Settings with customization
-
-Archived Chats with unarchive capability
-
-
-## 🛠️ Technology Stack
-Backend
-Django 4.0+ - Web framework
-
-Django Channels - WebSocket support
-
-PostgreSQL - Database (recommended)
-
-Redis - Channel layers & caching
-
-Security
-Fernet Encryption - Message encryption
-
-Django Auth - User authentication
-
-File Validation - Secure file uploads
-
-Frontend (Suggested)
-WebSocket Client - Real-time communication
-
-Bootstrap 5 - UI framework
-
-JavaScript - Dynamic interactions
-
-## 📁 Database Models
-### Core Models
-#### ChatRoom
-Private and group chat rooms
-
-#### Member management
-
-Room type classification
-
-#### Message
-Encrypted message content
-
-Multiple file type support
-
-Threading and replies
-
-Read receipts and reactions
-
-
-### Advanced Features
-#### MessageReaction
-Emoji reactions system
-
-Custom reaction types
-
-User reaction tracking
-
-#### BlockedUser
-User blocking system
-
-Privacy controls
-
-Block management
-
-#### ChatRoomSettings
-Per-chat customization
-
-Notification controls
-
-
-## 🔧 Installation & Setup
-
-1. Prerequisites
-```bash
-python >= 3.8
-postgresql >= 12
-redis >= 6.0
 ```
-2. Install Dependencies
-```bash
-pip install django channels daphne cryptography pillow
-pip install channels-redis redis psycopg2-binary
+┌──────────────┐     WebSocket      ┌─────────────────────┐
+│   Clients    │ ────────────────── │  web (Daphne+Django) │
+└──────────────┘                    │  REST + WS + presence│
+                                    └──────────┬──────────┘
+                                               │ gRPC
+                                    ┌──────────▼──────────┐
+                                    │  grpc ChatService    │
+                                    │  Send / Get / Stream │
+                                    └──────────┬──────────┘
+                                               │
+                         ┌─────────────────────┼─────────────────────┐
+                         │                     │                     │
+                    ┌────▼────┐           ┌────▼────┐
+                    │ Postgres│           │  Redis  │
+                    │ messages│           │ channels│
+                    └─────────┘           └─────────┘
 ```
 
+### Services (Docker Compose)
 
-# Channels Configuration
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            "hosts": [('127.0.0.1', 6379)],
-        },
-    },
-}
-4. Database Migration
+| Service | Port | Role |
+|---------|------|------|
+| `web` | 8000 | Django REST + Daphne WebSockets |
+| `grpc` | 50051 | gRPC message delivery microservice |
+| `db` | 5432 | PostgreSQL persistence |
+| `redis` | 6379 | Channels channel layer |
+
+---
+
+## Features
+
+- **One-to-one & group chat rooms** (`ChatRoom.room_type`: `private` | `group`)
+- **WebSockets** for live fan-out (`ws/chat/<room>/`, `ws/presence/`)
+- **gRPC** unary + streaming RPCs for low-latency send/get/presence
+- **Presence tracking** (online / offline / last_seen via `UserStatus`)
+- **Encrypted message storage** (Fernet) in PostgreSQL
+- **Typing indicators**, reactions, soft-delete, archive
+
+---
+
+## Quick start with Docker
+
 ```bash
-python manage.py makemigrations
+# 1. Copy env template
+cp .env.example .env
+
+# 2. Build and start all microservices
+docker compose up --build
+
+# 3. Create a superuser (optional)
+docker compose exec web python manage.py createsuperuser
+```
+
+- HTTP / WebSocket: http://localhost:8000  
+- gRPC: localhost:50051  
+
+---
+
+## Local development (without Docker)
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+
+pip install -r requirements.txt
+
+# Generate gRPC stubs
+python -m grpc_service.generate_stubs
+
+# SQLite mode: leave POSTGRES_HOST empty in .env
+# Or run Postgres/Redis and set vars from .env.example
+
 python manage.py migrate
-python manage.py collectstatic
-```
-5. Run Development Server
-```bash
-# Run with Daphne for WebSocket support
-daphne chat_app.asgi:application
+daphne -b 0.0.0.0 -p 8000 myprojects.asgi:application
+
+# In another terminal — gRPC service
+python -m grpc_service.server
 ```
 
-## 🔐 Security Implementation
-#### Message Encryption
-```bash
-# All messages are encrypted before storage
-def encrypt_content(self, value):
-    f = Fernet(settings.ENCRYPTION_KEY)
-    return f.encrypt(value.encode()).decode()
+---
 
-def decrypt_content(self):
-    f = Fernet(settings.ENCRYPTION_KEY)
-    return f.decrypt(self.content.encode()).decode()
+## WebSocket API
+
+### Chat room
+
 ```
+ws://localhost:8000/ws/chat/<room_name>/
+```
+
+**Send message**
+```json
+{"type": "chat.message", "message": "hello", "message_type": "text"}
+```
+
+**Typing**
+```json
+{"type": "typing", "is_typing": true}
+```
+
+**Receive**
+```json
+{
+  "type": "chat.message",
+  "message": {
+    "id": 1,
+    "sender": "alice",
+    "sender_id": 2,
+    "message": "hello",
+    "timestamp": "2026-08-05T12:00:00+00:00"
+  }
+}
+```
+
+### Presence
+
+```
+ws://localhost:8000/ws/presence/
+```
+
+Broadcast event:
+```json
+{
+  "type": "presence",
+  "user_id": 2,
+  "username": "alice",
+  "is_online": true,
+  "last_seen": "2026-08-05T12:00:00+00:00"
+}
+```
+
+Heartbeat:
+```json
+{"type": "heartbeat"}
+```
+
+---
+
+## gRPC API
+
+Proto: `grpc_service/proto/chat.proto`
+
+| RPC | Purpose |
+|-----|---------|
+| `SendMessage` | Persist + return message |
+| `GetMessages` | Recent messages for a room |
+| `GetPresence` | Online status for user IDs |
+| `StreamRoom` | Server-stream new room events |
+
+Regenerate stubs after editing the proto:
+
+```bash
+python -m grpc_service.generate_stubs
+```
+
+The Django web service calls gRPC via `chatapp/grpc_client.py` and falls back to
+the local ORM if the gRPC service is unreachable.
+
+---
+
+## REST highlights
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/token/` | JWT obtain |
+| GET/POST | `/chatrooms/` | List / create rooms |
+| GET/POST | `/chatrooms/<id>/messages/` | Messages |
+| GET/PATCH | `/user-status/` | Presence records |
+
+---
+
+## Project layout
+
+```
+realtime-chat-service/
+├── chatapp/                 # Django app (models, WS consumers, REST)
+│   ├── consumers.py         # WebSocket chat + presence
+│   ├── grpc_client.py       # Client to gRPC microservice
+│   └── models.py            # ChatRoom, Message, UserStatus, ...
+├── grpc_service/            # gRPC microservice
+│   ├── proto/chat.proto
+│   ├── server.py
+│   └── generate_stubs.py
+├── myprojects/              # Django project settings / ASGI
+├── docker-compose.yml       # web + grpc + postgres + redis
+├── Dockerfile
+└── requirements.txt
+```
+
+---
+
+## Security notes
+
+- Messages are encrypted at rest with Fernet (`ENCRYPTION_KEY`)
+- Change `SECRET_KEY` and DB passwords before production
+- Prefer Redis + PostgreSQL (not SQLite / InMemory channel layer) in production
