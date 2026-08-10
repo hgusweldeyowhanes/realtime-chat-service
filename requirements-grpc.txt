@@ -1,0 +1,6 @@
+# Optional: only needed to regenerate Python stubs from chat.proto
+#   python -m grpc_service.generate_stubs
+# Prefer Python 3.11/3.12. On Python 3.14 Windows, builds often fail.
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25,<6

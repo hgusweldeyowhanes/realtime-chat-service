@@ -1,4 +1,5 @@
 # Django real-time chat stack
+# Recommended: Python 3.10–3.12 on Windows (3.14 often lacks package wheels).
 Django>=4.2,<5.0
 daphne>=4.0
 channels>=4.0
@@ -13,7 +14,7 @@ psycopg2-binary>=2.9
 redis>=5.0
 gunicorn>=21.2
 
-# gRPC
-grpcio>=1.60
-grpcio-tools>=1.60
-protobuf>=4.25,<6
+# gRPC is optional for local WebSocket/REST testing.
+# Pre-generated stubs live in grpc_service/; install only if needed:
+#   pip install -r requirements-grpc.txt
+# (Docker image uses Python 3.11 where grpcio builds/wheels work.)

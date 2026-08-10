@@ -1,6 +1,9 @@
 """
 Thin gRPC client used by the Django web service to talk to the
 chat-delivery microservice for low-latency send/fetch/presence.
+
+Works without grpcio installed: methods return soft-failure results so
+WebSockets + ORM fallback still run on Python versions without grpc wheels.
 """
 from __future__ import annotations
 
@@ -8,19 +11,27 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-import grpc
-
 logger = logging.getLogger(__name__)
 
 
+def _grpc():
+    try:
+        import grpc
+        return grpc
+    except ImportError:
+        return None
+
+
 def _channel():
+    grpc = _grpc()
+    if grpc is None:
+        raise RuntimeError("grpcio is not installed")
     host = os.getenv("GRPC_HOST", "localhost")
     port = os.getenv("GRPC_PORT", "50051")
     return grpc.insecure_channel(f"{host}:{port}")
 
 
 def _stubs():
-    # Generated stubs live in grpc_service/
     from grpc_service import chat_pb2, chat_pb2_grpc
 
     return chat_pb2, chat_pb2_grpc
@@ -34,6 +45,8 @@ def send_message(
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
     """Send a chat message through the gRPC delivery service."""
+    if _grpc() is None:
+        return {"ok": False, "error": "grpcio not installed"}
     chat_pb2, chat_pb2_grpc = _stubs()
     try:
         with _channel() as channel:
@@ -60,6 +73,8 @@ def send_message(
 
 
 def get_messages(room_id: int, limit: int = 50, timeout: float = 5.0) -> List[Dict[str, Any]]:
+    if _grpc() is None:
+        return []
     chat_pb2, chat_pb2_grpc = _stubs()
     try:
         with _channel() as channel:
@@ -89,6 +104,8 @@ def get_messages(room_id: int, limit: int = 50, timeout: float = 5.0) -> List[Di
 
 
 def get_presence(user_ids: Optional[List[int]] = None, timeout: float = 5.0) -> List[Dict[str, Any]]:
+    if _grpc() is None:
+        return []
     chat_pb2, chat_pb2_grpc = _stubs()
     try:
         with _channel() as channel:
