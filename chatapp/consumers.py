@@ -231,6 +231,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         return updated_ids
 
+    @database_sync_to_async
+    def _persist_message(self, content: str, message_type: str = "text") -> dict:
         """
         Prefer gRPC microservice for delivery; fall back to local ORM
         so WebSockets still work if the gRPC service is down.

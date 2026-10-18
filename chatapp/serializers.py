@@ -1,32 +1,39 @@
 from rest_framework import serializers
+from django.contrib.auth.models import User
 from chatapp import models
 from cryptography.fernet import Fernet
 from django.conf import settings
 
+
 class ChatRoomSerializer(serializers.ModelSerializer):
-    members = serializers.StringRelatedField(many=True,read_only = True)
+    members = serializers.StringRelatedField(many=True, read_only=True)
+    name = serializers.CharField(source='room_name', read_only=True)
+
     class Meta:
         model = models.ChatRoom
         fields = [
-                'id',
-                'name',
-                'room_type',
-                'members',
-                'created_at',
-                'is_active'
-            ]
-        
+            'id',
+            'room_name',
+            'name',
+            'room_type',
+            'members',
+            'created_at',
+            'is_active',
+        ]
+
+
 class MessageSerializer(serializers.ModelSerializer):
-    sender_username = serializers.CharField(source = 'sender.username',  read_only = True)
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
     content = serializers.CharField()
+
     class Meta:
         model = models.Message
         fields = [
             'id',
             'chatroom',
             'sender',
-            'content',
             'sender_username',
+            'content',
             'message_type',
             'timestamp',
             'is_read',
@@ -34,31 +41,26 @@ class MessageSerializer(serializers.ModelSerializer):
             'is_deleted',
             'attachment',
         ]
-        read_only_fields = ['timestamp','is_read','is_edited','deleted']
+        read_only_fields = ['id', 'timestamp', 'is_read', 'is_edited', 'is_deleted']
 
-        def encrypt_message(self,value):
-            key = settings.ENCRYPTION_KEY
-            f = Fernet(key)
-            encrypted_value = f.encrypt(value.encode()).decode()
-            return encrypted_value
-        def validate_content(self,value):
-            return self.encrypt_message(value)
-        def decrypt_message(self,encrypted_content):
-            key = settings.ENCRYPTION_KEY
-            f = Fernet(key)
-            return f.decrypt(encrypted_content.encode()).decode()
-            
-     
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        try:
+            ret['content'] = instance.decrypt_content()
+        except Exception:
+            pass
+        return ret
 
-       
- 
+
 class EmojiSerializer(serializers.ModelSerializer):
     class Meta:
         model = models.Emoji
         fields = ['id', 'name', 'image', 'is_sticker']
 
+
 class UserStatusSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source = 'user.username', read_only = True)
+    username = serializers.CharField(source='user.username', read_only=True)
+
     class Meta:
         model = models.UserStatus
         fields = [
@@ -66,21 +68,23 @@ class UserStatusSerializer(serializers.ModelSerializer):
             'username',
             'is_online',
             'is_typing',
-            'last_seen'
+            'last_seen',
         ]
 
-        def create(self,validated_data):
-            validated_data['user'] = self.context['request'].user
-            return super().create(validated_data)
-        def update(self,instance,validated_data):
-            validated_data['user'] = self.context['request'].user
-            return super().update(instance,validated_data)
+    def create(self, validated_data):
+        validated_data['user'] = self.context['request'].user
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data['user'] = self.context['request'].user
+        return super().update(instance, validated_data)
 
 
 class BlockedUserSerializer(serializers.ModelSerializer):
-    blocker_username = serializers.CharField(source = 'blocker.username',read_only = True)
-    blocked_username = serializers.CharField(source = 'blocked.username', read_only = True)
-    blocker = serializers.PrimaryKeyRelatedField(read_only = True)
+    blocker_username = serializers.CharField(source='blocker.username', read_only=True)
+    blocked_username = serializers.CharField(source='blocked.username', read_only=True)
+    blocker = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = models.BlockedUser
         fields = [
@@ -88,17 +92,18 @@ class BlockedUserSerializer(serializers.ModelSerializer):
             'blocker_username',
             'blocked',
             'blocked_username',
-            'blocked_at'
+            'blocked_at',
         ]
 
+
 class TypingIndicatorSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source= 'user.username', read_only = True)
-    chatroom_username = serializers.CharField(source = 'chatroom.name', read_only = True)
-    user = serializers.PrimaryKeyRelatedField(read_only=True)  # client doesn't send this
- 
+    username = serializers.CharField(source='user.username', read_only=True)
+    chatroom_username = serializers.CharField(source='chatroom.room_name', read_only=True)
+    user = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = models.TypingIndicator
-        fields= [
+        fields = [
             'id',
             'chatroom_username',
             'chatroom',
@@ -107,25 +112,30 @@ class TypingIndicatorSerializer(serializers.ModelSerializer):
             'is_typing',
             'updated_at',
         ]
-        read_only = ['username','chatroom_username','updated_at','user']
+        read_only_fields = ['username', 'chatroom_username', 'updated_at', 'user']
+
+
 class MessageReactionSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source= 'user.username', read_only = True)
-    message_id = serializers.IntegerField(source = 'message.id', read_only = True)
+    username = serializers.CharField(source='user.username', read_only=True)
+    message_id = serializers.IntegerField(source='message.id', read_only=True)
+
     class Meta:
         model = models.MessageReaction
         fields = [
-            'id', 
-            'message', 
-            'message_id', 
-            'user', 
-            'username', 
-            'reaction', 
-            'reacted_at'
+            'id',
+            'message',
+            'message_id',
+            'user',
+            'username',
+            'reaction',
+            'reacted_at',
         ]
         read_only_fields = ['id', 'username', 'message_id', 'user', 'reacted_at']
 
+
 class ChatRoomSettingSerializer(serializers.ModelSerializer):
-    chatroom_name =  serializers.CharField(source = 'chatroom.user', read_only =True)
+    chatroom_name = serializers.CharField(source='chatroom.room_name', read_only=True)
+
     class Meta:
         model = models.ChatRoomSettings
         fields = [
@@ -135,12 +145,13 @@ class ChatRoomSettingSerializer(serializers.ModelSerializer):
             'mute_notifications',
             'dark_mode',
             'pin_chat',
-            'custom_nickname'
+            'custom_nickname',
         ]
-        read_only_fields = ['id','chatroom_name']
+        read_only_fields = ['id', 'chatroom_name']
+
 
 class ArchivedChatSerializer(serializers.ModelSerializer):
-    chatroom_name = serializers.CharField(source='chatroom.name', read_only=True)
+    chatroom_name = serializers.CharField(source='chatroom.room_name', read_only=True)
     archived_by_username = serializers.CharField(source='archived_by.username', read_only=True)
 
     class Meta:
@@ -153,13 +164,15 @@ class ArchivedChatSerializer(serializers.ModelSerializer):
             'archived_by_username',
             'archieved_at',
             'is_unarchieved',
-            'un_archievd_at'
+            'un_archievd_at',
         ]
         read_only_fields = ['id', 'chatroom_name', 'archived_by', 'archived_by_username', 'archieved_at']
-        
+
+
 class DeletedMessageSerializer(serializers.ModelSerializer):
-    message_id = serializers.CharField(source= 'message.id', read_only = True)
-    deleted_by_username = serializers.CharField(source = 'deleted_by.username', read_only = True)
+    message_id = serializers.CharField(source='message.id', read_only=True)
+    deleted_by_username = serializers.CharField(source='deleted_by.username', read_only=True)
+
     class Meta:
         model = models.DeletedMessage
         fields = [
@@ -170,9 +183,64 @@ class DeletedMessageSerializer(serializers.ModelSerializer):
             'deleted_by_username',
             'deleted_at',
             'is_permanent',
-            'permanent_deletion_at'
+            'permanent_deletion_at',
         ]
+        read_only_fields = ['id', 'message_id', 'deleted_by_username', 'deleted_at', 'deleted_by']
 
-        read_only_fields = ['id','message_id','deleted_by_username','deleted_at','deleted_by',]
 
-         
+# --- Step 2: User Registration & Profile Serializers ---
+
+
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, min_length=6, style={'input_type': 'password'})
+    tokens = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'password', 'first_name', 'last_name', 'tokens']
+
+    def validate_username(self, value):
+        if User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
+
+    def get_tokens(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(user)
+        return {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        }
+
+    def create(self, validated_data):
+        user = User.objects.create_user(
+            username=validated_data['username'],
+            email=validated_data.get('email', ''),
+            password=validated_data['password'],
+            first_name=validated_data.get('first_name', ''),
+            last_name=validated_data.get('last_name', ''),
+        )
+        models.UserStatus.objects.get_or_create(user=user, defaults={'is_online': False})
+        return user
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    is_online = serializers.BooleanField(source='status.is_online', read_only=True)
+    last_seen = serializers.DateTimeField(source='status.last_seen', read_only=True)
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'is_online', 'last_seen']
+        read_only_fields = ['id', 'username', 'date_joined', 'is_online', 'last_seen']
+
+
+class UserSummarySerializer(serializers.ModelSerializer):
+    is_online = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'is_online']
+
+    def get_is_online(self, obj):
+        status_obj = getattr(obj, 'status', None)
+        return status_obj.is_online if status_obj else False

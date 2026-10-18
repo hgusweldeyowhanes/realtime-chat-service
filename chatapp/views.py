@@ -5,6 +5,7 @@ from django.urls import reverse_lazy
 from rest_framework import generics,permissions,status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.contrib.auth.models import User
 from chatapp.serializers import (
     ChatRoomSerializer,
     MessageSerializer,
@@ -14,9 +15,12 @@ from chatapp.serializers import (
     DeletedMessageSerializer,
     ArchivedChatSerializer,
     TypingIndicatorSerializer,
-    ChatRoomSettingSerializer
-    )
-from django.contrib.auth.views import LoginView,LogoutView
+    ChatRoomSettingSerializer,
+    UserRegistrationSerializer,
+    UserProfileSerializer,
+    UserSummarySerializer,
+)
+from django.contrib.auth.views import LoginView, LogoutView
 from django.views.generic import TemplateView
 
 
@@ -156,14 +160,86 @@ class MessageDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Response({"status":"message deleted"}, status=status.HTTP_204_NO_CONTENT)
 
 class MessageSearchView(APIView):
+    """
+    Search messages in chatrooms the user is a member of.
+    Since message content is encrypted with Fernet in the database,
+    we retrieve messages in the user's rooms, decrypt them, and match
+    the plaintext query and/or attachment name.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request):
-        query = request.GET.get('q')
-        results = models.Message.objects.filter(
-            Q(content__icontains=query) |
-            Q(attachment__icontains=query)
-        )[:100]
-        serializer = MessageSerializer(results, many=True)
+        query = (request.GET.get('q') or '').strip()
+        if not query:
+            return Response([])
+
+        chatroom_id = request.GET.get('chatroom_id')
+
+        qs = models.Message.objects.filter(
+            chatroom__members=request.user,
+            is_deleted=False
+        )
+        if chatroom_id:
+            qs = qs.filter(chatroom_id=chatroom_id)
+
+        # Capped to recent 300 messages to prevent excessive memory decryption
+        candidates = list(
+            qs.select_related('sender', 'chatroom').order_by('-timestamp')[:300]
+        )
+
+        q_lower = query.lower()
+        matched = []
+        for msg in candidates:
+            try:
+                decrypted = msg.decrypt_content()
+            except Exception:
+                decrypted = msg.content or ""
+
+            attachment_name = msg.attachment.name if msg.attachment else ""
+            if q_lower in decrypted.lower() or (attachment_name and q_lower in attachment_name.lower()):
+                matched.append(msg)
+                if len(matched) >= 50:
+                    break
+
+        serializer = MessageSerializer(matched, many=True)
         return Response(serializer.data)
+
+
+# --- Step 2: User Registration & Profile Views ---
+
+
+class RegisterView(generics.CreateAPIView):
+    """Register a new user and return JWT auth tokens."""
+    serializer_class = UserRegistrationSerializer
+    permission_classes = [permissions.AllowAny]
+
+
+class CurrentUserProfileView(generics.RetrieveUpdateAPIView):
+    """Get or update current authenticated user profile."""
+    serializer_class = UserProfileSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
+
+
+class UserListView(generics.ListAPIView):
+    """List or search other users to start conversations with."""
+    serializer_class = UserSummarySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = User.objects.exclude(id=self.request.user.id)
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(email__icontains=search)
+            )
+        return qs.order_by('username')[:50]
+
 
 class UserStatusView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
