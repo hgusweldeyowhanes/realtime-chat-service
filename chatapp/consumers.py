@@ -78,6 +78,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self._set_typing(bool(payload.get("is_typing", True)))
             return
 
+        # ── Read-receipt ──────────────────────────────────────────────────
+        # Client sends: {"type": "read_receipt", "message_ids": [1, 2, 3]}
+        # Server marks those messages read in DB and broadcasts so the
+        # sender's UI can flip their ticks to "seen".
+        if event_type == "read_receipt":
+            message_ids = payload.get("message_ids", [])
+            if not isinstance(message_ids, list) or not message_ids:
+                await self.send(text_data=json.dumps({"error": "read_receipt requires non-empty message_ids list"}))
+                return
+
+            # Only mark as read if the current user is NOT the sender
+            marked_ids = await self._mark_messages_read(message_ids)
+
+            if marked_ids:
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "chat.read",
+                        "reader_id": self.user.id,
+                        "reader_username": self.user.username,
+                        "message_ids": marked_ids,
+                    },
+                )
+            return
+
         message_text = (payload.get("message") or "").strip()
         if not message_text:
             return
@@ -119,6 +144,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
         )
 
+    async def chat_read(self, event):
+        """
+        Broadcast read-receipt to all members of the room.
+        Clients use this to flip single/double-tick → blue-tick (seen) indicators.
+        Payload sent to each WebSocket client:
+          {
+            "type": "read_receipt",
+            "reader_id": <int>,
+            "reader_username": "<str>",
+            "message_ids": [<int>, ...]
+          }
+        """
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "type": "read_receipt",
+                    "reader_id": event["reader_id"],
+                    "reader_username": event["reader_username"],
+                    "message_ids": event["message_ids"],
+                }
+            )
+        )
+
     # ------------------------------------------------------------------ DB
     @database_sync_to_async
     def _user_is_member(self, room_name, user_id):
@@ -154,7 +202,35 @@ class ChatConsumer(AsyncWebsocketConsumer):
             pass
 
     @database_sync_to_async
-    def _persist_message(self, content: str, message_type: str):
+    def _mark_messages_read(self, message_ids: list) -> list:
+        """
+        Mark a list of messages as is_read=True for the current reader.
+
+        Only messages:
+          - Belonging to this chatroom
+          - NOT sent by the current user (you can't mark your own as "read by you")
+          - Not already marked as read
+
+        Returns the IDs that were actually updated so the broadcast is accurate.
+        """
+        try:
+            room = models.ChatRoom.objects.get(room_name=self.room_name_raw)
+        except models.ChatRoom.DoesNotExist:
+            return []
+
+        # Filter to safe, valid IDs in this room that are unread and not from this user
+        qs = models.Message.objects.filter(
+            id__in=message_ids,
+            chatroom=room,
+            is_read=False,
+        ).exclude(sender_id=self.user.id)
+
+        updated_ids = list(qs.values_list("id", flat=True))
+        if updated_ids:
+            qs.update(is_read=True)
+
+        return updated_ids
+
         """
         Prefer gRPC microservice for delivery; fall back to local ORM
         so WebSockets still work if the gRPC service is down.
