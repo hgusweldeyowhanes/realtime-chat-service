@@ -8,6 +8,9 @@ from django.conf import settings
 class ChatRoomSerializer(serializers.ModelSerializer):
     members = serializers.StringRelatedField(many=True, read_only=True)
     name = serializers.CharField(source='room_name', read_only=True)
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    created_by_username = serializers.CharField(source='created_by.username', read_only=True)
+    member_count = serializers.IntegerField(source='members.count', read_only=True)
 
     class Meta:
         model = models.ChatRoom
@@ -17,6 +20,9 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             'name',
             'room_type',
             'members',
+            'member_count',
+            'created_by',
+            'created_by_username',
             'created_at',
             'is_active',
         ]
@@ -244,3 +250,49 @@ class UserSummarySerializer(serializers.ModelSerializer):
     def get_is_online(self, obj):
         status_obj = getattr(obj, 'status', None)
         return status_obj.is_online if status_obj else False
+
+
+# --- Step 3: Group Chat Serializers ---
+
+
+class CreateGroupChatSerializer(serializers.Serializer):
+    room_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    member_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        default=list
+    )
+    members = serializers.ListField(
+        required=False,
+        default=list
+    )
+
+    def validate(self, attrs):
+        name_val = attrs.get('room_name') or attrs.get('name')
+        if not name_val or not str(name_val).strip():
+            raise serializers.ValidationError({"room_name": "A valid group room_name is required."})
+        attrs['room_name'] = str(name_val).strip()
+        return attrs
+
+
+class InviteToGroupChatSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField(required=False)
+    user_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    username = serializers.CharField(required=False, allow_blank=True)
+    usernames = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    member_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    members = serializers.ListField(required=False, default=list)
+
+    def validate(self, attrs):
+        has_any = (
+            attrs.get('user_id') is not None or
+            bool(attrs.get('user_ids')) or
+            bool(attrs.get('username')) or
+            bool(attrs.get('usernames')) or
+            bool(attrs.get('member_ids')) or
+            bool(attrs.get('members'))
+        )
+        if not has_any:
+            raise serializers.ValidationError("At least one user ID or username must be provided to invite.")
+        return attrs
