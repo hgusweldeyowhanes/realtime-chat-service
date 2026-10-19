@@ -13,6 +13,7 @@ class ChatRoom(models.Model):
     room_name = models.CharField(max_length=255)
     room_type = models.CharField(max_length=10,choices=ROOM_TYPE,default='private')
     members = models.ManyToManyField(User,related_name='chatrooms')
+    created_by = models.ForeignKey(User, related_name='created_rooms', on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
 
