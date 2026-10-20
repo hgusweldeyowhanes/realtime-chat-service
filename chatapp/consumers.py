@@ -253,8 +253,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 message_type=message_type,
             )
             if result.get("ok"):
+                msg_id = result["message_id"]
+                try:
+                    from chatapp.tasks import send_push_notification_task
+                    send_push_notification_task.delay(msg_id)
+                except Exception as exc:
+                    logger.debug("Failed to dispatch Celery push notification task: %s", exc)
                 return {
-                    "id": result["message_id"],
+                    "id": msg_id,
                     "content": result.get("content") or content,
                     "timestamp": result.get("timestamp") or timezone.now().isoformat(),
                 }
@@ -272,11 +278,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
             plain = msg.decrypt_content()
         except Exception:
             plain = content
+
+        try:
+            from chatapp.tasks import send_push_notification_task
+            send_push_notification_task.delay(msg.id)
+        except Exception as exc:
+            logger.debug("Failed to dispatch Celery push notification task: %s", exc)
+
         return {
             "id": msg.id,
             "content": plain,
             "timestamp": msg.timestamp.isoformat(),
         }
+
 
 
 class PresenceConsumer(AsyncWebsocketConsumer):

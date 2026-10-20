@@ -40,6 +40,19 @@ urlpatterns = [
     path('messages/<int:pk>/', views.MessageDetailView.as_view(), name='message-detail'),
     path('messages/search/', views.MessageSearchView.as_view(), name='message-search'),
 
+    # Step 5: Media / File Upload
+    path('chatrooms/<int:chatroom_id>/upload/', views.FileUploadView.as_view(), name='chatroom-upload'),
+    path('upload/', views.FileUploadView.as_view(), name='file-upload'),
+    path('media/upload/', views.FileUploadView.as_view(), name='media-upload-alias'),
+
+    # Step 6: Push Notifications & FCM Device Tokens
+    path('devices/', views.FCMDeviceListCreateView.as_view(), name='device-list-create'),
+    path('devices/<str:identifier>/', views.FCMDeviceDetailView.as_view(), name='device-detail'),
+    path('notifications/devices/', views.FCMDeviceListCreateView.as_view(), name='notifications-device-list-create'),
+    path('notifications/devices/<str:identifier>/', views.FCMDeviceDetailView.as_view(), name='notifications-device-detail'),
+    path('fcm/devices/', views.FCMDeviceListCreateView.as_view(), name='fcm-device-list-create'),
+    path('fcm/devices/<str:identifier>/', views.FCMDeviceDetailView.as_view(), name='fcm-device-detail'),
+
     # Indicators, Settings & Reactions
     path('typing-indicator/', views.TypingIndicatorListView.as_view(), name='typing-indicator'),
     path('message-reaction/', views.MessageReactionView.as_view(), name='message-reaction'),

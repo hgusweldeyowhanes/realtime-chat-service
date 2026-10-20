@@ -1,8 +1,10 @@
+import os
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from chatapp import models
 from cryptography.fernet import Fernet
 from django.conf import settings
+
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):
@@ -30,7 +32,8 @@ class ChatRoomSerializer(serializers.ModelSerializer):
 
 class MessageSerializer(serializers.ModelSerializer):
     sender_username = serializers.CharField(source='sender.username', read_only=True)
-    content = serializers.CharField()
+    content = serializers.CharField(required=False, allow_blank=True, default='')
+    attachment_url = serializers.SerializerMethodField()
 
     class Meta:
         model = models.Message
@@ -46,8 +49,20 @@ class MessageSerializer(serializers.ModelSerializer):
             'is_edited',
             'is_deleted',
             'attachment',
+            'attachment_url',
         ]
-        read_only_fields = ['id', 'timestamp', 'is_read', 'is_edited', 'is_deleted']
+        read_only_fields = ['id', 'timestamp', 'is_read', 'is_edited', 'is_deleted', 'sender']
+
+    def get_attachment_url(self, obj):
+        if not obj.attachment:
+            return None
+        request = self.context.get('request')
+        if request:
+            try:
+                return request.build_absolute_uri(obj.attachment.url)
+            except Exception:
+                pass
+        return getattr(obj.attachment, 'url', None)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -56,6 +71,7 @@ class MessageSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return ret
+
 
 
 class EmojiSerializer(serializers.ModelSerializer):
@@ -296,3 +312,79 @@ class InviteToGroupChatSerializer(serializers.Serializer):
         if not has_any:
             raise serializers.ValidationError("At least one user ID or username must be provided to invite.")
         return attrs
+
+
+class FCMDeviceSerializer(serializers.ModelSerializer):
+    user_username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = models.FCMDevice
+        fields = [
+            'id',
+            'user',
+            'user_username',
+            'registration_token',
+            'device_type',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'user', 'user_username', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user if request and request.user.is_authenticated else validated_data.get('user')
+        token = validated_data.get('registration_token')
+        device_type = validated_data.get('device_type', 'android')
+        device, _ = models.FCMDevice.objects.update_or_create(
+            registration_token=token,
+            defaults={
+                'user': user,
+                'device_type': device_type,
+                'is_active': True,
+            }
+        )
+        return device
+
+
+class FileUploadSerializer(serializers.Serializer):
+    file = serializers.FileField(required=True)
+    content = serializers.CharField(required=False, allow_blank=True, default='')
+    caption = serializers.CharField(required=False, allow_blank=True, default='')
+    message_type = serializers.CharField(required=False, allow_blank=True, default='')
+    parent_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate_file(self, value):
+        max_size = getattr(settings, 'MAX_UPLOAD_SIZE', 50 * 1024 * 1024)
+        if value.size > max_size:
+            raise serializers.ValidationError(
+                f"File size ({value.size} bytes) exceeds maximum allowed size ({max_size} bytes)."
+            )
+        return value
+
+    def validate(self, attrs):
+        # Support both 'content' and 'caption' param names
+        if not attrs.get('content') and attrs.get('caption'):
+            attrs['content'] = attrs['caption']
+
+        file_obj = attrs.get('file')
+        msg_type = (attrs.get('message_type') or '').strip().lower()
+
+        # Auto-detect message_type from content type / extension if not provided or valid
+        if not msg_type or msg_type not in dict(models.Message.FILE_TYPE):
+            content_type = getattr(file_obj, 'content_type', '') or ''
+            fname = getattr(file_obj, 'name', '') or ''
+            ext = os.path.splitext(fname)[1].lower()
+
+            if content_type.startswith('image/') or ext in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'}:
+                msg_type = 'image'
+            elif content_type.startswith('audio/') or ext in {'.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'}:
+                msg_type = 'voice'
+            elif content_type.startswith('video/') or ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm'}:
+                msg_type = 'video'
+            else:
+                msg_type = 'document'
+
+        attrs['message_type'] = msg_type
+        return attrs
+

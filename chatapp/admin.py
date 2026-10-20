@@ -33,3 +33,10 @@ admin.site.register(models.UserStatus)
 admin.site.register(models.BlockedUser)
 admin.site.register(models.TypingIndicator)
 admin.site.register(models.Emoji)
+
+@admin.register(models.FCMDevice)
+class FCMDeviceAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'device_type', 'registration_token', 'is_active', 'updated_at')
+    list_filter = ('device_type', 'is_active')
+    search_fields = ('user__username', 'registration_token')
+

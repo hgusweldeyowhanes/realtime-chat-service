@@ -68,5 +68,24 @@ services:
       db:
         condition: service_healthy
 
+  celery_worker:
+    build: .
+    command: celery -A myprojects worker --loglevel=info
+    env_file:
+      - .env.example
+    environment:
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
+

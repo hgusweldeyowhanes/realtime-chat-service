@@ -13,6 +13,8 @@ Pillow>=10.0
 psycopg2-binary>=2.9
 redis>=5.0
 gunicorn>=21.2
+celery>=5.3
+requests>=2.31
 
 # gRPC is optional for local WebSocket/REST testing.
 # Pre-generated stubs live in grpc_service/; install only if needed:

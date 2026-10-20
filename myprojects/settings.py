@@ -174,3 +174,26 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/login/"
+
+# ---------------------------------------------------------------------------
+# Celery settings
+# ---------------------------------------------------------------------------
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=f"redis://{REDIS_HOST or 'localhost'}:{REDIS_PORT}/0")
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=f"redis://{REDIS_HOST or 'localhost'}:{REDIS_PORT}/0")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_ALWAYS_EAGER = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)
+CELERY_TASK_EAGER_PROPAGATES = True
+
+# ---------------------------------------------------------------------------
+# Firebase Cloud Messaging (FCM) & Push Notifications
+# ---------------------------------------------------------------------------
+FCM_SERVER_KEY = env("FCM_SERVER_KEY", default="")
+FCM_PROJECT_ID = env("FCM_PROJECT_ID", default="")
+FCM_CREDENTIALS_FILE = env("FCM_CREDENTIALS_FILE", default="")
+
+# Maximum upload file size (default: 50MB)
+MAX_UPLOAD_SIZE = env.int("MAX_UPLOAD_SIZE", default=50 * 1024 * 1024)
+

@@ -1,30 +1,89 @@
-from django.shortcuts import get_object_or_404,redirect,render
-from chatapp import models
+import logging
+import os
+import re
+
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.contrib.auth.views import LoginView, LogoutView
 from django.db.models import Q
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
+from django.views.generic import TemplateView
 from rest_framework import generics, permissions, status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth.models import User
+
+from chatapp import models
 from chatapp.serializers import (
-    ChatRoomSerializer,
-    MessageSerializer,
-    MessageReactionSerializer,
-    UserStatusSerializer,
-    BlockedUserSerializer,
-    DeletedMessageSerializer,
     ArchivedChatSerializer,
-    TypingIndicatorSerializer,
+    BlockedUserSerializer,
+    ChatRoomSerializer,
     ChatRoomSettingSerializer,
-    UserRegistrationSerializer,
-    UserProfileSerializer,
-    UserSummarySerializer,
     CreateGroupChatSerializer,
+    DeletedMessageSerializer,
+    FCMDeviceSerializer,
+    FileUploadSerializer,
     InviteToGroupChatSerializer,
+    MessageReactionSerializer,
+    MessageSerializer,
+    UserProfileSerializer,
+    UserRegistrationSerializer,
+    UserStatusSerializer,
+    UserSummarySerializer,
+    TypingIndicatorSerializer,
 )
-from django.contrib.auth.views import LoginView, LogoutView
-from django.views.generic import TemplateView
+
+logger = logging.getLogger(__name__)
+
+
+def _broadcast_message_to_room(chatroom, message, request=None):
+    """
+    Broadcasts a saved Message object to all connected WebSocket clients in the room.
+    """
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            safe_room_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "-", chatroom.room_name)
+            group_name = f"chat_{safe_room_name}"
+
+            att_url = ""
+            if message.attachment:
+                if request:
+                    try:
+                        att_url = request.build_absolute_uri(message.attachment.url)
+                    except Exception:
+                        att_url = message.attachment.url
+                else:
+                    att_url = message.attachment.url
+
+            try:
+                content_text = message.decrypt_content() if message.content else ""
+            except Exception:
+                content_text = message.content or ""
+
+            async_to_sync(channel_layer.group_send)(
+                group_name,
+                {
+                    "type": "chat.message",
+                    "message": {
+                        "id": message.id,
+                        "sender": message.sender.username,
+                        "sender_id": message.sender.id,
+                        "message": content_text,
+                        "message_type": message.message_type,
+                        "room_name": chatroom.room_name,
+                        "timestamp": message.timestamp.isoformat(),
+                        "attachment_url": att_url,
+                    },
+                },
+            )
+    except Exception as exc:
+        logger.debug("Failed to broadcast message to channel layer: %s", exc)
+
 
 
 def CreateRoom(request):
@@ -206,6 +265,7 @@ class MessageView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MessageSerializer
     pagination_class = MessagePagination
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         chatroom_id = self.kwargs.get('chatroom_id')
@@ -215,7 +275,29 @@ class MessageView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         chatroom_id = self.kwargs.get('chatroom_id')
         chatroom = get_object_or_404(models.ChatRoom, id=chatroom_id, members=self.request.user)
-        serializer.save(sender=self.request.user, chatroom=chatroom)
+        instance = serializer.save(sender=self.request.user, chatroom=chatroom)
+
+        if instance.attachment and instance.message_type == 'text':
+            fname = instance.attachment.name.lower()
+            ext = os.path.splitext(fname)[1]
+            if ext in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'}:
+                instance.message_type = 'image'
+            elif ext in {'.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'}:
+                instance.message_type = 'voice'
+            elif ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm'}:
+                instance.message_type = 'video'
+            else:
+                instance.message_type = 'document'
+            instance.save(update_fields=['message_type'])
+
+        _broadcast_message_to_room(chatroom, instance, self.request)
+
+        try:
+            from chatapp.tasks import send_push_notification_task
+            send_push_notification_task.delay(instance.id)
+        except Exception as exc:
+            logger.debug("Failed to dispatch Celery push notification task: %s", exc)
+
     
 class MessageDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -681,5 +763,166 @@ class GroupChatRemoveMemberView(APIView):
             "members": [u.username for u in room.members.all()],
             "member_count": room.members.count()
         }, status=status.HTTP_200_OK)
+
+
+class FileUploadView(APIView):
+    """
+    Step 5: Media / File Upload Endpoint.
+
+    Supports multipart/form-data upload:
+      - file (or attachment): The file payload.
+      - chatroom (or chatroom_id): ID of the destination chatroom (optional).
+      - content (or caption): Optional text message or caption.
+      - message_type: Optional (image, voice, video, document). Auto-detected if omitted.
+      - parent_id: Optional parent message ID for threaded replies.
+
+    When chatroom is supplied:
+      - Validates caller membership in the room (403 if unauthorized).
+      - Creates Message with encrypted content and attachment file.
+      - Broadcasts message immediately to all room members via Django Channels WebSockets.
+      - Dispatches asynchronous FCM push notification via Celery worker.
+      - Returns 201 Created with Message representation.
+
+    When chatroom is not supplied:
+      - Saves the file to media storage and returns { "file_url", "file_name", "size", "message_type" }.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, chatroom_id=None):
+        room_id = chatroom_id or request.data.get('chatroom_id') or request.data.get('chatroom')
+
+        upload_file = request.FILES.get('file') or request.FILES.get('attachment')
+        if not upload_file:
+            return Response(
+                {"error": "No file uploaded. Please supply a 'file' or 'attachment' field."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = request.data.copy()
+        data['file'] = upload_file
+        serializer = FileUploadSerializer(data=data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        validated = serializer.validated_data
+        file_obj = validated['file']
+        content = validated.get('content', '')
+        message_type = validated.get('message_type', 'document')
+        parent_id = validated.get('parent_id')
+
+        if room_id:
+            try:
+                room_id_int = int(room_id)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid chatroom_id."}, status=status.HTTP_400_BAD_REQUEST)
+
+            chatroom = get_object_or_404(models.ChatRoom, id=room_id_int)
+            if not chatroom.members.filter(id=request.user.id).exists():
+                return Response(
+                    {"error": "You are not a member of this chatroom."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            parent_msg = None
+            if parent_id:
+                parent_msg = models.Message.objects.filter(id=parent_id, chatroom=chatroom).first()
+
+            message = models.Message.objects.create(
+                chatroom=chatroom,
+                sender=request.user,
+                content=content,
+                message_type=message_type,
+                attachment=file_obj,
+                parent=parent_msg,
+            )
+
+            # Real-time WebSocket fan-out
+            _broadcast_message_to_room(chatroom, message, request)
+
+            # Asynchronous Celery push notification
+            try:
+                from chatapp.tasks import send_push_notification_task
+                send_push_notification_task.delay(message.id)
+            except Exception as exc:
+                logger.debug("Failed to dispatch Celery push task: %s", exc)
+
+            response_serializer = MessageSerializer(message, context={'request': request})
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+        # Standalone upload without chatroom
+        from django.core.files.storage import default_storage
+        saved_path = default_storage.save(f"uploads/{file_obj.name}", file_obj)
+        try:
+            file_url = request.build_absolute_uri(default_storage.url(saved_path))
+        except Exception:
+            file_url = default_storage.url(saved_path)
+
+        return Response({
+            "message": "File uploaded successfully.",
+            "file_url": file_url,
+            "file_name": file_obj.name,
+            "size": file_obj.size,
+            "message_type": message_type,
+        }, status=status.HTTP_201_CREATED)
+
+
+class FCMDeviceListCreateView(generics.ListCreateAPIView):
+    """
+    Step 6: Register and list FCM device tokens for push notifications.
+
+    POST /devices/
+      {"registration_token": "...", "device_type": "android"|"ios"|"web"}
+    GET /devices/
+      List all active registered devices for current user
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = FCMDeviceSerializer
+
+    def get_queryset(self):
+        return models.FCMDevice.objects.filter(user=self.request.user, is_active=True)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        device = serializer.save()
+        return Response(
+            FCMDeviceSerializer(device, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class FCMDeviceDetailView(APIView):
+    """
+    Step 6: Unregister / deactivate an FCM device token.
+
+    DELETE /devices/<identifier>/  (identifier can be token or primary key)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, identifier=None, pk=None):
+        lookup = identifier if identifier is not None else pk
+        if lookup is None:
+            lookup = request.data.get('registration_token') or request.data.get('token')
+
+        if not lookup:
+            return Response(
+                {"error": "Please provide a device identifier or registration_token."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        device = None
+        if str(lookup).isdigit():
+            device = models.FCMDevice.objects.filter(id=int(lookup), user=request.user).first()
+        if not device:
+            device = models.FCMDevice.objects.filter(registration_token=str(lookup), user=request.user).first()
+
+        if not device:
+            return Response({"error": "Device token not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        device.is_active = False
+        device.save(update_fields=['is_active'])
+        return Response({"message": "Device token unregistered successfully."}, status=status.HTTP_200_OK)
+
 
 
