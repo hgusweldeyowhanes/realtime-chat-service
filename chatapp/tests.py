@@ -99,7 +99,8 @@ class MessageAndSearchTests(TestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
         res = self.client.get(f'/chatrooms/{self.room.id}/messages/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(res.data[0]['content'], 'Secret Project Plan 2026')
+        items = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual(items[0]['content'], 'Secret Project Plan 2026')
 
     def test_message_search_with_encrypted_content(self):
         models.Message.objects.create(
@@ -182,4 +183,227 @@ class WebSocketJWTAuthTests(TestCase):
         }
         await middleware(scope, None, None)
         self.assertTrue(inner_called)
+
+
+class GroupChatManagementTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(username='alice', password='Password123!')
+        self.bob = User.objects.create_user(username='bob', password='Password123!')
+        self.charlie = User.objects.create_user(username='charlie', password='Password123!')
+        self.david = User.objects.create_user(username='david', password='Password123!')
+
+        refresh = RefreshToken.for_user(self.alice)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def test_create_group_chat_with_initial_members(self):
+        res = self.client.post('/chatrooms/group/', {
+            'room_name': 'Backend Engineering',
+            'member_ids': [self.bob.id, self.charlie.id],
+        }, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['room_name'], 'Backend Engineering')
+        self.assertEqual(res.data['room_type'], 'group')
+        self.assertEqual(res.data['created_by'], self.alice.id)
+        self.assertEqual(res.data['created_by_username'], 'alice')
+        self.assertEqual(res.data['member_count'], 3)
+        self.assertIn('alice', res.data['members'])
+        self.assertIn('bob', res.data['members'])
+        self.assertIn('charlie', res.data['members'])
+
+        room = models.ChatRoom.objects.get(id=res.data['id'])
+        self.assertTrue(room.members.filter(id=self.alice.id).exists())
+        self.assertTrue(models.ChatRoomSettings.objects.filter(chatroom=room).exists())
+
+    def test_create_group_chat_validation_missing_name(self):
+        res = self.client.post('/chatrooms/group/', {
+            'room_name': '   ',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invite_users_by_id_and_username(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Mobile Dev',
+            room_type='group',
+            created_by=self.alice
+        )
+        room.members.add(self.alice, self.bob)
+
+        # Alice invites charlie by id and david by username
+        res = self.client.post(f'/chatrooms/{room.id}/invite/', {
+            'user_ids': [self.charlie.id],
+            'usernames': ['david'],
+        }, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('charlie', res.data['added_members'])
+        self.assertIn('david', res.data['added_members'])
+        self.assertEqual(res.data['member_count'], 4)
+        self.assertTrue(room.members.filter(id=self.charlie.id).exists())
+        self.assertTrue(room.members.filter(id=self.david.id).exists())
+
+    def test_invite_already_member_handling(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Designers',
+            room_type='group',
+            created_by=self.alice
+        )
+        room.members.add(self.alice, self.bob)
+
+        # Re-inviting bob
+        res = self.client.post(f'/chatrooms/{room.id}/invite/', {
+            'user_id': self.bob.id,
+        }, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('bob', res.data['already_members'])
+
+    def test_non_member_cannot_invite(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Secret Group',
+            room_type='group',
+            created_by=self.bob
+        )
+        room.members.add(self.bob, self.charlie)
+
+        # Alice is not a member
+        res = self.client.post(f'/chatrooms/{room.id}/invite/', {
+            'username': 'david',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_invite_to_private_chat(self):
+        private_room = models.ChatRoom.objects.create(
+            room_name='private_1',
+            room_type='private'
+        )
+        private_room.members.add(self.alice, self.bob)
+
+        res = self.client.post(f'/chatrooms/{private_room.id}/invite/', {
+            'username': 'charlie',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_leave_group_chat_and_deactivation(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Temporary Project',
+            room_type='group',
+            created_by=self.alice
+        )
+        room.members.add(self.alice, self.bob)
+
+        # 1. Alice leaves
+        res = self.client.post(f'/chatrooms/{room.id}/leave/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['remaining_members_count'], 1)
+        self.assertFalse(room.members.filter(id=self.alice.id).exists())
+        room.refresh_from_db()
+        self.assertTrue(room.is_active)
+
+        # 2. Bob leaves (last member)
+        bob_client = APIClient()
+        bob_refresh = RefreshToken.for_user(self.bob)
+        bob_client.credentials(HTTP_AUTHORIZATION=f'Bearer {bob_refresh.access_token}')
+        bob_res = bob_client.post(f'/chatrooms/{room.id}/leave/')
+        self.assertEqual(bob_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(bob_res.data['remaining_members_count'], 0)
+
+        room.refresh_from_db()
+        self.assertFalse(room.is_active)
+
+    def test_leave_fails_for_non_member(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Dev Team',
+            room_type='group',
+            created_by=self.bob
+        )
+        room.members.add(self.bob)
+
+        # Alice is not a member
+        res = self.client.post(f'/chatrooms/{room.id}/leave/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_members_and_creator_remove_member(self):
+        room = models.ChatRoom.objects.create(
+            room_name='Ops Team',
+            room_type='group',
+            created_by=self.alice
+        )
+        room.members.add(self.alice, self.bob, self.charlie)
+
+        # 1. List members
+        members_res = self.client.get(f'/chatrooms/{room.id}/members/')
+        self.assertEqual(members_res.status_code, status.HTTP_200_OK)
+        member_names = [m['username'] for m in members_res.data]
+        self.assertIn('alice', member_names)
+        self.assertIn('bob', member_names)
+        self.assertIn('charlie', member_names)
+
+        # 2. Creator removes member
+        rem_res = self.client.post(f'/chatrooms/{room.id}/remove-member/', {
+            'username': 'bob',
+        }, format='json')
+        self.assertEqual(rem_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(room.members.filter(id=self.bob.id).exists())
+
+
+class MessagePaginationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='alice', password='Password123!')
+        self.room = models.ChatRoom.objects.create(room_name='paginated_room', room_type='group')
+        self.room.members.add(self.user)
+
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+        # Create 25 messages
+        for i in range(1, 26):
+            models.Message.objects.create(
+                chatroom=self.room,
+                sender=self.user,
+                content=f'Message {i:02d}',
+            )
+
+    def test_default_pagination_first_page(self):
+        res = self.client.get(f'/chatrooms/{self.room.id}/messages/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.assertIn('count', res.data)
+        self.assertIn('next', res.data)
+        self.assertIn('previous', res.data)
+        self.assertIn('results', res.data)
+
+        self.assertEqual(res.data['count'], 25)
+        self.assertEqual(res.data['page'], 1)
+        self.assertEqual(res.data['total_pages'], 2)
+        self.assertEqual(len(res.data['results']), 20)
+        self.assertIsNotNone(res.data['next'])
+        self.assertIsNone(res.data['previous'])
+        self.assertEqual(res.data['results'][0]['content'], 'Message 01')
+
+    def test_custom_page_size(self):
+        res = self.client.get(f'/chatrooms/{self.room.id}/messages/?page_size=10')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data['results']), 10)
+        self.assertEqual(res.data['total_pages'], 3)
+        self.assertEqual(res.data['page_size'], 10)
+
+    def test_second_page_navigation(self):
+        res = self.client.get(f'/chatrooms/{self.room.id}/messages/?page=2&page_size=10')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['page'], 2)
+        self.assertEqual(len(res.data['results']), 10)
+        self.assertIsNotNone(res.data['next'])
+        self.assertIsNotNone(res.data['previous'])
+        # Messages 11 to 20
+        self.assertEqual(res.data['results'][0]['content'], 'Message 11')
+
+    def test_unpaginated_fallback_via_param(self):
+        res = self.client.get(f'/chatrooms/{self.room.id}/messages/?paginate=false')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(res.data, list)
+        self.assertEqual(len(res.data), 25)
+        self.assertEqual(res.data[0]['content'], 'Message 01')
 
