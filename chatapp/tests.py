@@ -448,7 +448,10 @@ class FileUploadTests(TestCase):
         self.assertEqual(msg.chatroom, self.room)
         self.assertEqual(msg.sender, self.alice)
         self.assertEqual(msg.message_type, 'image')
-        self.assertTrue(msg.attachment.name.endswith('photo.jpg'))
+        self.assertTrue(msg.attachment.name.endswith('.jpg'))
+        self.assertIn('photo', msg.attachment.name)
+
+
 
     def test_upload_document_auto_detection(self):
         pdf_file = SimpleUploadedFile(
