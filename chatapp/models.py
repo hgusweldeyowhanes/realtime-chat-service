@@ -46,7 +46,7 @@ class Message(models.Model):
     ]
     chatroom = models.ForeignKey(ChatRoom,related_name='messages',on_delete=models.CASCADE)
     sender = models.ForeignKey(User ,related_name='sent_messages',on_delete=models.CASCADE)
-    content = models.TextField()
+    content = models.TextField(blank=True, default='')
     message_type = models.CharField(max_length=10,choices=FILE_TYPE,default='text')
     timestamp = models.DateTimeField(auto_now_add=True)
     is_read = models.BooleanField(default=False)
@@ -74,6 +74,8 @@ class Message(models.Model):
 
     def decrypt_content(self):
         """Decrypt stored content."""
+        if not self.content:
+            return ""
         f = Fernet(settings.ENCRYPTION_KEY)
         return f.decrypt(self.content.encode()).decode()
 
@@ -159,6 +161,27 @@ class DeletedMessage(models.Model):
     permanent_deletion_at = models.DateTimeField(null=True,blank=True)
     def __str__(self):
         return f"{self.message.id} deleted by {self.deleted_by.username}"
+
+
+class FCMDevice(models.Model):
+    DEVICE_TYPES = [
+        ('android', 'Android'),
+        ('ios', 'iOS'),
+        ('web', 'Web'),
+    ]
+    user = models.ForeignKey(User, related_name='fcm_devices', on_delete=models.CASCADE)
+    registration_token = models.CharField(max_length=255, unique=True)
+    device_type = models.CharField(max_length=10, choices=DEVICE_TYPES, default='android')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.user.username} ({self.device_type}) - {self.registration_token[:16]}..."
+
 
     
 
