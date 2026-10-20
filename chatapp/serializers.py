@@ -51,7 +51,8 @@ class MessageSerializer(serializers.ModelSerializer):
             'attachment',
             'attachment_url',
         ]
-        read_only_fields = ['id', 'timestamp', 'is_read', 'is_edited', 'is_deleted', 'sender']
+        read_only_fields = ['id', 'chatroom', 'timestamp', 'is_read', 'is_edited', 'is_deleted', 'sender']
+
 
     def get_attachment_url(self, obj):
         if not obj.attachment:
@@ -316,6 +317,7 @@ class InviteToGroupChatSerializer(serializers.Serializer):
 
 class FCMDeviceSerializer(serializers.ModelSerializer):
     user_username = serializers.CharField(source='user.username', read_only=True)
+    registration_token = serializers.CharField(max_length=255)
 
     class Meta:
         model = models.FCMDevice
@@ -330,6 +332,10 @@ class FCMDeviceSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'user', 'user_username', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'registration_token': {'validators': []},
+        }
+
 
     def create(self, validated_data):
         request = self.context.get('request')

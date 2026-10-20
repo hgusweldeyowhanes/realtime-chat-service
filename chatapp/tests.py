@@ -1,11 +1,16 @@
 import json
-from django.test import TestCase
+from unittest.mock import patch
+
 from django.contrib.auth.models import User
-from rest_framework.test import APIClient
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from rest_framework import status
+from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from chatapp import models
+from chatapp.fcm import _handle_fcm_results, notify_room_members_of_message
+from chatapp.tasks import send_push_notification_task
 
 
 class AuthAndUserTests(TestCase):
@@ -406,4 +411,300 @@ class MessagePaginationTests(TestCase):
         self.assertIsInstance(res.data, list)
         self.assertEqual(len(res.data), 25)
         self.assertEqual(res.data[0]['content'], 'Message 01')
+
+
+class FileUploadTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(username='alice', password='Password123!')
+        self.bob = User.objects.create_user(username='bob', password='Password123!')
+        self.eve = User.objects.create_user(username='eve', password='Password123!')
+
+        self.room = models.ChatRoom.objects.create(room_name='media_room', room_type='group')
+        self.room.members.add(self.alice, self.bob)
+
+        refresh = RefreshToken.for_user(self.alice)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def test_upload_image_to_chatroom_with_caption(self):
+        dummy_file = SimpleUploadedFile(
+            'photo.jpg',
+            b'\xff\xd8\xff\xe0testimagecontent',
+            content_type='image/jpeg'
+        )
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'file': dummy_file, 'content': 'Vacation photo!'},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['content'], 'Vacation photo!')
+        self.assertEqual(response.data['message_type'], 'image')
+        self.assertIn('attachment', response.data)
+        self.assertIsNotNone(response.data['attachment_url'])
+
+        # Verify persisted in database
+        msg = models.Message.objects.get(id=response.data['id'])
+        self.assertEqual(msg.chatroom, self.room)
+        self.assertEqual(msg.sender, self.alice)
+        self.assertEqual(msg.message_type, 'image')
+        self.assertTrue(msg.attachment.name.endswith('photo.jpg'))
+
+    def test_upload_document_auto_detection(self):
+        pdf_file = SimpleUploadedFile(
+            'report.pdf',
+            b'%PDF-1.4 dummy report content',
+            content_type='application/pdf'
+        )
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'attachment': pdf_file},  # test 'attachment' alias
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message_type'], 'document')
+        self.assertIsNotNone(response.data['attachment_url'])
+
+    def test_upload_audio_auto_detection(self):
+        audio_file = SimpleUploadedFile(
+            'voice_memo.mp3',
+            b'ID3dummy_audio_bytes',
+            content_type='audio/mpeg'
+        )
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'file': audio_file},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message_type'], 'voice')
+
+    def test_upload_standalone_without_chatroom(self):
+        file_obj = SimpleUploadedFile(
+            'document.txt',
+            b'Plain text documentation',
+            content_type='text/plain'
+        )
+        response = self.client.post(
+            '/upload/',
+            {'file': file_obj},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('file_url', response.data)
+        self.assertEqual(response.data['file_name'], 'document.txt')
+        self.assertEqual(response.data['message_type'], 'document')
+
+    def test_upload_fails_for_non_member(self):
+        eve_client = APIClient()
+        eve_refresh = RefreshToken.for_user(self.eve)
+        eve_client.credentials(HTTP_AUTHORIZATION=f'Bearer {eve_refresh.access_token}')
+
+        dummy_file = SimpleUploadedFile('hacker.png', b'image', content_type='image/png')
+        response = eve_client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'file': dummy_file},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_upload_fails_without_file(self):
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'content': 'Message without file'},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(MAX_UPLOAD_SIZE=50)
+    def test_upload_exceeds_max_size(self):
+        huge_file = SimpleUploadedFile('huge.bin', b'a' * 100, content_type='application/octet-stream')
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/upload/',
+            {'file': huge_file},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_message_view_accepts_file_attachment(self):
+        img = SimpleUploadedFile('attached.png', b'\x89PNG\r\n', content_type='image/png')
+        response = self.client.post(
+            f'/chatrooms/{self.room.id}/messages/',
+            {'content': 'Check this image', 'attachment': img},
+            format='multipart'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['content'], 'Check this image')
+        self.assertEqual(response.data['message_type'], 'image')
+        self.assertIsNotNone(response.data['attachment_url'])
+
+
+class FCMDeviceAndNotificationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(username='alice', password='Password123!')
+        self.bob = User.objects.create_user(username='bob', password='Password123!')
+        self.charlie = User.objects.create_user(username='charlie', password='Password123!')
+
+        self.room = models.ChatRoom.objects.create(room_name='team_chat', room_type='group')
+        self.room.members.add(self.alice, self.bob, self.charlie)
+
+        refresh = RefreshToken.for_user(self.alice)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {refresh.access_token}')
+
+    def test_register_and_list_fcm_device(self):
+        # Register Android device
+        res = self.client.post('/devices/', {
+            'registration_token': 'fcm_token_alice_android_123',
+            'device_type': 'android',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['registration_token'], 'fcm_token_alice_android_123')
+        self.assertEqual(res.data['device_type'], 'android')
+        self.assertTrue(res.data['is_active'])
+
+        # List devices
+        list_res = self.client.get('/devices/')
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        tokens = [d['registration_token'] for d in list_res.data]
+        self.assertIn('fcm_token_alice_android_123', tokens)
+
+    def test_register_device_is_idempotent_and_updates_type(self):
+        # Register once
+        self.client.post('/devices/', {
+            'registration_token': 'fcm_token_alice_unique',
+            'device_type': 'android',
+        }, format='json')
+
+        # Register same token with iOS
+        res2 = self.client.post('/devices/', {
+            'registration_token': 'fcm_token_alice_unique',
+            'device_type': 'ios',
+        }, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res2.data['device_type'], 'ios')
+        # Only one device record
+        self.assertEqual(
+            models.FCMDevice.objects.filter(registration_token='fcm_token_alice_unique').count(),
+            1
+        )
+
+    def test_unregister_fcm_device(self):
+        models.FCMDevice.objects.create(
+            user=self.alice,
+            registration_token='fcm_token_to_remove',
+            device_type='web',
+            is_active=True
+        )
+        del_res = self.client.delete('/devices/fcm_token_to_remove/')
+        self.assertEqual(del_res.status_code, status.HTTP_200_OK)
+
+        device = models.FCMDevice.objects.get(registration_token='fcm_token_to_remove')
+        self.assertFalse(device.is_active)
+
+    def test_notify_room_members_skips_sender_and_notifies_recipients(self):
+        # Bob has a registered device
+        models.FCMDevice.objects.create(
+            user=self.bob,
+            registration_token='token_bob_device',
+            device_type='android'
+        )
+        # Alice has a registered device
+        models.FCMDevice.objects.create(
+            user=self.alice,
+            registration_token='token_alice_device',
+            device_type='ios'
+        )
+
+        msg = models.Message.objects.create(
+            chatroom=self.room,
+            sender=self.alice,
+            content='Hello team!',
+        )
+
+        with patch('chatapp.fcm.send_fcm_notification') as mock_send:
+            mock_send.return_value = {'success': 1, 'failure': 0}
+            result = notify_room_members_of_message(msg.id)
+
+            self.assertTrue(result['success'])
+            mock_send.assert_called_once()
+            call_kwargs = mock_send.call_args[1]
+            tokens_called = call_kwargs['registration_tokens']
+
+            # Bob's token must be included
+            self.assertIn('token_bob_device', tokens_called)
+            # Alice (the sender) must NOT be notified
+            self.assertNotIn('token_alice_device', tokens_called)
+            self.assertIn('Hello team!', call_kwargs['body'])
+
+    def test_notify_room_members_skips_muted_room(self):
+        models.FCMDevice.objects.create(
+            user=self.bob,
+            registration_token='token_bob_muted',
+            device_type='android'
+        )
+        models.ChatRoomSettings.objects.create(
+            chatroom=self.room,
+            mute_notifications=True
+        )
+
+        msg = models.Message.objects.create(
+            chatroom=self.room,
+            sender=self.alice,
+            content='Muted message',
+        )
+
+        result = notify_room_members_of_message(msg.id)
+        self.assertEqual(result.get('recipient_count'), 0)
+        self.assertEqual(result.get('info'), 'all_recipients_muted_or_blocked')
+
+    def test_notify_room_members_skips_blocked_user(self):
+        models.FCMDevice.objects.create(
+            user=self.bob,
+            registration_token='token_bob_blocked',
+            device_type='android'
+        )
+        # Bob blocked Alice
+        models.BlockedUser.objects.create(blocker=self.bob, blocked=self.alice)
+
+        msg = models.Message.objects.create(
+            chatroom=self.room,
+            sender=self.alice,
+            content='Alice message to blocked user',
+        )
+
+        with patch('chatapp.fcm.send_fcm_notification') as mock_send:
+            result = notify_room_members_of_message(msg.id)
+            # Bob is excluded; Charlie has no device registered
+            self.assertEqual(result.get('info'), 'no_registered_devices')
+            mock_send.assert_not_called()
+
+    def test_fcm_results_deactivates_unregistered_tokens(self):
+        dev1 = models.FCMDevice.objects.create(
+            user=self.bob,
+            registration_token='bad_token_123',
+            is_active=True
+        )
+        _handle_fcm_results(
+            ['bad_token_123'],
+            [{'error': 'NotRegistered'}]
+        )
+        dev1.refresh_from_db()
+        self.assertFalse(dev1.is_active)
+
+    def test_celery_send_push_notification_task_execution(self):
+        models.FCMDevice.objects.create(
+            user=self.bob,
+            registration_token='token_bob_celery',
+            device_type='android'
+        )
+        msg = models.Message.objects.create(
+            chatroom=self.room,
+            sender=self.alice,
+            content='Task test message',
+        )
+        task_res = send_push_notification_task(msg.id)
+        self.assertTrue(task_res.get('success'))
+        self.assertEqual(task_res.get('tokens_count'), 1)
+
 
